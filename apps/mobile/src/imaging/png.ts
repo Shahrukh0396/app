@@ -70,6 +70,72 @@ function chunk(type: string, data: Uint8Array): Uint8Array {
   return out;
 }
 
+export function decodePng(bytes: Uint8Array): RgbaBuffer {
+  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  for (let index = 0; index < signature.length; index += 1) {
+    if (bytes[index] !== signature[index]) throw new Error('Invalid PNG');
+  }
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  const idat: Uint8Array[] = [];
+  while (offset + 12 <= bytes.length) {
+    const length = new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0);
+    const type = String.fromCharCode(bytes[offset + 4] ?? 0, bytes[offset + 5] ?? 0, bytes[offset + 6] ?? 0, bytes[offset + 7] ?? 0);
+    const data = bytes.subarray(offset + 8, offset + 8 + length);
+    if (type === 'IHDR') {
+      const header = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      width = header.getUint32(0);
+      height = header.getUint32(4);
+      if (data[8] !== 8 || data[9] !== 6) throw new Error('PNG must be 8-bit RGBA');
+    } else if (type === 'IDAT') {
+      idat.push(data);
+    } else if (type === 'IEND') {
+      break;
+    }
+    offset += 12 + length;
+  }
+  const compressedSize = idat.reduce((sum, part) => sum + part.length, 0);
+  const compressed = new Uint8Array(compressedSize);
+  let cursor = 0;
+  for (const part of idat) {
+    compressed.set(part, cursor);
+    cursor += part.length;
+  }
+  const raw = inflateStored(compressed);
+  const stride = width * 4 + 1;
+  if (width < 1 || height < 1 || raw.length < stride * height) throw new Error('PNG image data is truncated');
+  const pixels = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    if (raw[y * stride] !== 0) throw new Error('PNG row filters other than None are not supported');
+    pixels.set(raw.subarray(y * stride + 1, (y + 1) * stride), y * width * 4);
+  }
+  return { width, height, data: pixels };
+}
+
+function inflateStored(zlib: Uint8Array): Uint8Array {
+  if (zlib.length < 7 || zlib[0] !== 0x78) throw new Error('Unsupported PNG compression');
+  const parts: Uint8Array[] = [];
+  let offset = 2;
+  while (offset + 5 <= zlib.length) {
+    const header = zlib[offset] ?? 0;
+    if (header !== 0x00 && header !== 0x01) throw new Error('Only stored zlib blocks are supported');
+    const length = (zlib[offset + 1] ?? 0) | ((zlib[offset + 2] ?? 0) << 8);
+    offset += 5;
+    parts.push(zlib.subarray(offset, offset + length));
+    offset += length;
+    if (header === 0x01) break;
+  }
+  const size = parts.reduce((sum, part) => sum + part.length, 0);
+  const raw = new Uint8Array(size);
+  let cursor = 0;
+  for (const part of parts) {
+    raw.set(part, cursor);
+    cursor += part.length;
+  }
+  return raw;
+}
+
 export function encodePng(image: RgbaBuffer): Uint8Array {
   if (image.data.length !== image.width * image.height * 4) {
     throw new Error('RGBA buffer length does not match width and height');

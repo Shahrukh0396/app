@@ -1,19 +1,26 @@
-import { useEffect, useState } from 'react';
-import { FlatList, ScrollView, StyleSheet, View } from 'react-native';
-import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput } from 'react-native-vision-camera';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { FlatList, Image, ScrollView, StyleSheet, View } from 'react-native';
+import { Camera, useCameraDevice, useCameraPermission, useFrameOutput, usePhotoOutput, type Frame } from 'react-native-vision-camera';
 import { Chip, ProgressBar, SegmentedButtons, Switch, Text } from 'react-native-paper';
 import Pdf from 'react-native-pdf';
 import Animated, { FadeInRight } from 'react-native-reanimated';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { PLAN_CATALOG } from '@scanflow/types';
+import { PatternLock } from '../components/PatternLock';
+import { ContinuousSlider } from '../components/Slider';
 import { Card, Field, PrimaryButton, QuietButton, Screen, Title } from '../components/ui';
 import { translate } from '../i18n';
 import { documentsRepo, foldersRepo } from '../db/repositories';
-import { applyAdjustments, applyNamedFilter, DEFAULT_ADJUSTMENTS, type Adjustments, type FilterName } from '../imaging/filters';
-import { rgbaToLuminance } from '../scanner/quadDetector';
-import { detectDocumentQuad, isQuadStable } from '../scanner/quadDetector';
-import { warpPerspective, type Quad } from '../scanner/homography';
+import { decodeImage } from '../imaging/decode';
+import { DEFAULT_ADJUSTMENTS, type Adjustments, type FilterName } from '../imaging/filters';
 import { encodePng } from '../imaging/png';
+import { quadOutputSize, renderScanImage } from '../imaging/renderPage';
+import { handleCameraFrame } from '../scanner/cameraFrame';
+import { setFrameListener } from '../scanner/frameBridge';
+import { quadFromLuma } from '../scanner/framePixels';
+import { detectDocumentQuad, isQuadStable } from '../scanner/quadDetector';
+import { rgbaToLuminance } from '../scanner/quadDetector';
+import { warpPerspective } from '../scanner/homography';
 import { buildScanPdf } from '../pdf/generate';
 import { mailtoUrl, slackUrl, teamsUrl, telegramUrl, whatsappUrl } from '../share/targets';
 import {
@@ -21,12 +28,14 @@ import {
   openExternal,
   promptBiometric,
   purchasePackage,
+  readBytes,
   recognizeText,
   shareFile,
   shareText,
   signInWithApple,
   signInWithGoogle,
   signInWithMicrosoft,
+  writeBytes,
   writePdf,
 } from '../native/platform';
 import { useAppDispatch, useAppSelector } from '../app/hooks';
@@ -267,48 +276,74 @@ export function ScannerScreen({ navigation }: Props<'Scanner'>) {
   const auto = useAppSelector((state) => state.scanner.autoCapture);
   const history = useAppSelector((state) => state.scanner.quadHistory);
   const stable = useAppSelector((state) => state.scanner.stable);
+  const [status, setStatus] = useState('');
+  const autoRef = useRef(auto);
+  const historyRef = useRef(history);
+  const busyRef = useRef(false);
+  autoRef.current = auto;
+  historyRef.current = history;
+  const capture = useCallback(() => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    void (async () => {
+      const photo = await photoOutput.capturePhoto({ flashMode: 'off' }, {});
+      try {
+        const encoded = new Uint8Array(await photo.getFileDataAsync());
+        const savedPath = await photo.saveToTemporaryFileAsync();
+        const image = decodeImage(encoded);
+        const quad = detectDocumentQuad(rgbaToLuminance(image.data, image.width, image.height));
+        dispatch(
+          addPage({
+            id: `page-${Date.now()}`,
+            uri: savedPath.startsWith('file://') ? savedPath : `file://${savedPath}`,
+            width: image.width,
+            height: image.height,
+            rotation: image.width > image.height ? 90 : 0,
+            filter: 'original',
+            quad,
+            ocrText: '',
+            adjustments: { ...DEFAULT_ADJUSTMENTS },
+            flipped: false,
+          }),
+        );
+        navigation.navigate('Crop');
+      } finally {
+        photo.dispose();
+      }
+    })()
+      .catch((error: unknown) => {
+        setStatus(error instanceof Error ? error.message : 'The camera did not return a photo');
+      })
+      .finally(() => {
+        busyRef.current = false;
+      });
+  }, [dispatch, navigation, photoOutput]);
   useEffect(() => {
     if (!permission.hasPermission) void permission.requestPermission();
   }, [permission]);
-  const detect = () => {
-    const sample = samplePage();
-    const gray = rgbaToLuminance(sample.data, sample.width, sample.height);
-    const quad = detectDocumentQuad(gray);
-    const nextHistory = quad ? [...history, quad].slice(-8) : history;
-    const ready = isQuadStable(nextHistory, 6);
-    dispatch(noteQuad({ quad, stable: ready }));
-    if (auto && ready && quad) capture(quad, sample.width, sample.height);
-  };
-  const capture = (quad: Quad | null, width = 1200, height = 1600) => {
-    void (async () => {
-      let uri: string;
-      try {
-        const file = await photoOutput.capturePhotoToFile({ flashMode: 'off' }, {});
-        uri = file.filePath.startsWith('file://') ? file.filePath : `file://${file.filePath}`;
-      } catch {
-        uri = `scanflow://capture/${Date.now()}`;
-      }
-      dispatch(
-        addPage({
-          id: `page-${Date.now()}`,
-          uri,
-          width,
-          height,
-          rotation: width > height ? 90 : 0,
-          filter: 'original',
-          quad,
-          ocrText: '',
-          adjustments: { brightness: 0, contrast: 0, saturation: 0, sharpness: 0, temperature: 0, denoise: 0 },
-          flipped: false,
-        }),
-      );
-      navigation.navigate('Crop');
-    })();
-  };
+  useEffect(() => {
+    setFrameListener((samples, width, height) => {
+      const quad = quadFromLuma({ width, height, pixels: Float32Array.from(samples), scale: 1 });
+      const nextHistory = quad ? [...historyRef.current, quad].slice(-8) : historyRef.current;
+      const ready = Boolean(quad) && isQuadStable(nextHistory, 8);
+      dispatch(noteQuad({ quad, stable: ready }));
+      if (autoRef.current && ready) capture();
+    });
+    return () => setFrameListener(null);
+  }, [capture, dispatch]);
+  const onFrame = useCallback((frame: Frame) => {
+    'worklet';
+    handleCameraFrame(frame);
+  }, []);
+  const frameOutput = useFrameOutput({
+    pixelFormat: 'yuv',
+    targetResolution: { width: 640, height: 480 },
+    onFrame,
+  });
   return (
     <View style={styles.cameraWrap}>
       {device ? (
-        <Camera style={styles.camera} device={device} isActive outputs={[photoOutput]} />
+        <Camera style={styles.camera} device={device} isActive outputs={[photoOutput, frameOutput]} />
       ) : (
         <View style={styles.cameraFallback}>
           <Text>Camera preview is unavailable on this device.</Text>
@@ -316,9 +351,9 @@ export function ScannerScreen({ navigation }: Props<'Scanner'>) {
       )}
       <View style={styles.cameraActions}>
         <QuietButton label={auto ? 'Auto capture on' : 'Auto capture off'} onPress={() => dispatch(setAutoCapture(!auto))} />
-        <QuietButton label="Detect page" hint="Runs the quad detector on a luminance sample" onPress={detect} />
-        <PrimaryButton label="Capture" onPress={() => capture(stable ? history[history.length - 1] ?? null : null)} />
+        <PrimaryButton label="Capture" onPress={capture} />
         {stable ? <Text accessibilityRole="alert">Page edges are stable</Text> : null}
+        {status ? <Text accessibilityRole="alert">{status}</Text> : null}
       </View>
     </View>
   );
@@ -327,19 +362,27 @@ export function ScannerScreen({ navigation }: Props<'Scanner'>) {
 export function CropScreen({ navigation }: Props<'Crop'>) {
   const page = useActivePage();
   const dispatch = useAppDispatch();
+  const [status, setStatus] = useState('');
   const apply = () => {
-    if (page?.quad) {
-      const sample = samplePage();
-      const warped = warpPerspective(sample, page.quad, 160, 220);
-      dispatch(updateActivePage({ width: warped.width, height: warped.height }));
-    }
-    dispatch(setStep('enhance'));
-    navigation.navigate('Enhancement');
+    if (!page) return;
+    void (async () => {
+      const image = decodeImage(await readBytes(page.uri));
+      const size = page.quad ? quadOutputSize(page.quad) : null;
+      const output = page.quad && size ? warpPerspective(image, page.quad, size.width, size.height) : image;
+      const uri = await writeBytes(`crop-${page.id}.png`, encodePng(output));
+      dispatch(updateActivePage({ uri, width: output.width, height: output.height, quad: null }));
+      dispatch(setStep('enhance'));
+      navigation.navigate('Enhancement');
+    })().catch((error: unknown) => {
+      setStatus(error instanceof Error ? error.message : 'The captured photo could not be cropped');
+    });
   };
   return (
     <Screen>
       <Title>Crop</Title>
+      {page ? <Image source={{ uri: page.uri }} style={styles.preview} accessibilityLabel="Captured page" /> : null}
       <Text>Corners: {page?.quad ? page.quad.map((point) => `${Math.round(point.x)},${Math.round(point.y)}`).join(' · ') : 'full frame'}</Text>
+      {status ? <Text accessibilityRole="alert">{status}</Text> : null}
       <PrimaryButton label="Apply crop" onPress={apply} />
       <QuietButton label="Skip" onPress={() => navigation.navigate('Enhancement')} />
     </Screen>
@@ -350,23 +393,37 @@ export function EnhancementScreen({ navigation }: Props<'Enhancement'>) {
   const page = useActivePage();
   const dispatch = useAppDispatch();
   const adjustments = page?.adjustments ?? DEFAULT_ADJUSTMENTS;
+  const [previewUri, setPreviewUri] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
   const filters: FilterName[] = ['original', 'magic', 'blackWhite', 'grayscale', 'colorEnhance', 'highContrast', 'document', 'receipt', 'photo'];
-  const nudge = (key: keyof Adjustments, delta: number) => {
-    const next = { ...adjustments, [key]: Math.max(-80, Math.min(80, adjustments[key] + delta)) };
-    dispatch(updateActivePage({ adjustments: next }));
-    applyAdjustments(samplePage(), next);
+  const setAdjustment = (key: keyof Adjustments, value: number) => {
+    dispatch(updateActivePage({ adjustments: { ...adjustments, [key]: value } }));
+  };
+  const preview = () => {
+    if (!page) return;
+    void (async () => {
+      const image = decodeImage(await readBytes(page.uri));
+      const rendered = renderScanImage(image, {
+        filter: page.filter,
+        adjustments,
+        flipped: page.flipped,
+        rotation: page.rotation,
+      });
+      setPreviewUri(await writeBytes(`enhance-${page.id}.png`, encodePng(rendered)));
+    })().catch((error: unknown) => {
+      setStatus(error instanceof Error ? error.message : 'The captured photo could not be enhanced');
+    });
   };
   return (
     <ScrollView contentContainerStyle={styles.scroll}>
       <Title>Enhance</Title>
+      {previewUri || page ? <Image source={{ uri: previewUri ?? page?.uri }} style={styles.preview} accessibilityLabel="Enhanced page" /> : null}
       <Animated.View entering={FadeInRight.duration(240)}>
-        {(Object.keys(DEFAULT_ADJUSTMENTS) as Array<keyof Adjustments>).map((key) => (
-          <View key={key} style={styles.row}>
-            <Text>{key} {adjustments[key]}</Text>
-            <QuietButton label={`Decrease ${key}`} hint={`Lower ${key}`} onPress={() => nudge(key, key === 'denoise' ? -10 : -5)} />
-            <QuietButton label={`Increase ${key}`} hint={`Raise ${key}`} onPress={() => nudge(key, key === 'denoise' ? 10 : 5)} />
-          </View>
-        ))}
+        <ContinuousSlider label="Brightness" value={adjustments.brightness} minimum={-80} maximum={80} onChange={(value) => setAdjustment('brightness', value)} />
+        <ContinuousSlider label="Contrast" value={adjustments.contrast} minimum={-80} maximum={80} onChange={(value) => setAdjustment('contrast', value)} />
+        <ContinuousSlider label="Sharpness" value={adjustments.sharpness} minimum={0} maximum={80} onChange={(value) => setAdjustment('sharpness', value)} />
+        <ContinuousSlider label="Saturation" value={adjustments.saturation} minimum={-80} maximum={80} onChange={(value) => setAdjustment('saturation', value)} />
+        <ContinuousSlider label="White balance" value={adjustments.temperature} minimum={-80} maximum={80} onChange={(value) => setAdjustment('temperature', value)} />
       </Animated.View>
       <View style={styles.row}>
         {filters.map((filter) => (
@@ -377,13 +434,8 @@ export function EnhancementScreen({ navigation }: Props<'Enhancement'>) {
       </View>
       <QuietButton label="Rotate" onPress={() => dispatch(rotateActive())} />
       <QuietButton label="Flip" onPress={() => dispatch(updateActivePage({ flipped: !page?.flipped }))} />
-      <PrimaryButton
-        label="Preview filter"
-        onPress={() => {
-          const sample = samplePage();
-          applyNamedFilter(sample, page?.filter ?? 'document');
-        }}
-      />
+      {status ? <Text accessibilityRole="alert">{status}</Text> : null}
+      <PrimaryButton label="Preview filter" onPress={preview} />
       <PrimaryButton label="Pages" onPress={() => navigation.navigate('PageManager')} />
     </ScrollView>
   );
@@ -416,12 +468,24 @@ export function PDFPreviewScreen() {
   const pdfUri = useAppSelector((state) => state.scanner.pdfUri);
   const compression = useAppSelector((state) => state.settings.pdfCompression);
   const dispatch = useAppDispatch();
+  const [status, setStatus] = useState('');
   const build = async () => {
-    const sample = encodePng(samplePage());
-    const bytes = await buildScanPdf(
-      pages.map((page) => ({ bytes: sample, mime: 'image/png' as const, ocrText: page.ocrText || page.filter })),
-      { pageSize: 'A4', watermark: compression === 'low' ? 'SCANFLOW' : undefined },
+    if (pages.length === 0) {
+      setStatus('Capture a page before building a PDF');
+      return;
+    }
+    const rendered = await Promise.all(
+      pages.map(async (page) => {
+        const image = renderScanImage(decodeImage(await readBytes(page.uri)), {
+          filter: page.filter,
+          adjustments: page.adjustments,
+          flipped: page.flipped,
+          rotation: page.rotation,
+        });
+        return { bytes: encodePng(image), mime: 'image/png' as const, ocrText: page.ocrText };
+      }),
     );
+    const bytes = await buildScanPdf(rendered, { pageSize: 'A4', watermark: compression === 'low' ? 'SCANFLOW' : undefined });
     const uri = await writePdf(`scan-${Date.now()}.pdf`, bytes);
     dispatch(setPdfUri(uri));
   };
@@ -429,7 +493,9 @@ export function PDFPreviewScreen() {
     <Screen>
       <Title>PDF preview</Title>
       <Text>Compression: {compression}. {pages.length} pages.</Text>
-      <PrimaryButton label="Generate PDF" onPress={() => void build()} />
+      {pages[0] ? <Image source={{ uri: pages[0].uri }} style={styles.preview} accessibilityLabel="Captured page" /> : null}
+      {status ? <Text accessibilityRole="alert">{status}</Text> : null}
+      <PrimaryButton label="Generate PDF" onPress={() => void build().catch((error: unknown) => setStatus(error instanceof Error ? error.message : 'PDF generation failed'))} />
       {pdfUri ? <Pdf source={{ uri: pdfUri }} style={styles.pdf} trustAllCerts={false} /> : <Text>Generate a PDF to preview it.</Text>}
     </Screen>
   );
@@ -764,7 +830,7 @@ export function SecuritySettingsScreen() {
   const dispatch = useAppDispatch();
   const lockEnabled = useAppSelector((state) => state.settings.lockEnabled);
   const [pin, setPin] = useState('');
-  const [pattern, setPattern] = useState('0,1,2,5,8');
+  const [pattern, setPattern] = useState<number[]>([]);
   const [message, setMessage] = useState('');
   return (
     <Screen>
@@ -787,33 +853,18 @@ export function SecuritySettingsScreen() {
           setMessage('PIN saved in encrypted settings storage');
         }}
       />
-      <Text accessibilityRole="header">Pattern</Text>
-      <View style={styles.row}>
-        {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((cell) => (
-          <QuietButton
-            key={cell}
-            label={String(cell)}
-            hint={`Pattern cell ${cell}`}
-            onPress={() => {
-              const cells = pattern.split(',').map((value) => Number(value.trim())).filter((value) => Number.isInteger(value));
-              if (cells.includes(cell)) return;
-              setPattern([...cells, cell].join(','));
-            }}
-          />
-        ))}
-      </View>
-      <Field label="Pattern" value={pattern} onChangeText={setPattern} hint="Cells 0 through 8" />
+      <PatternLock onComplete={setPattern} />
       <QuietButton
         label="Save pattern"
         onPress={() => {
-          const cells = pattern.split(',').map((cell) => Number(cell.trim()));
-          if (!isValidPattern(cells)) {
+          if (!isValidPattern(pattern)) {
             setMessage('Pattern must be 4 unique cells');
             return;
           }
           const salt = 'scanflow-pattern-salt';
-          settingsStorage.set('pattern', JSON.stringify({ salt, hash: hashSecret(cells.join('-'), salt) }));
+          settingsStorage.set('pattern', JSON.stringify({ salt, hash: hashSecret(pattern.join('-'), salt) }));
           dispatch(patchSettings({ lockType: 'pattern', lockEnabled: true }));
+          setMessage('Pattern saved');
         }}
       />
       <QuietButton
@@ -842,23 +893,41 @@ export function SecuritySettingsScreen() {
 
 function UnlockGate() {
   const lockEnabled = useAppSelector((state) => state.settings.lockEnabled);
+  const lockType = useAppSelector((state) => state.settings.lockType);
   const unlocked = useAppSelector((state) => state.auth.unlocked);
   const [pin, setPin] = useState('');
+  const [message, setMessage] = useState('');
   const dispatch = useAppDispatch();
   if (!lockEnabled || unlocked) return null;
   return (
     <Card>
       <Text variant="titleMedium">Scanflow is locked</Text>
-      <Field label="PIN" value={pin} onChangeText={setPin} secure />
-      <PrimaryButton
-        label="Unlock"
-        onPress={() => {
-          const raw = settingsStorage.getString('pin');
-          if (!raw) return;
-          const saved = JSON.parse(raw) as { salt: string; hash: string };
-          if (verifySecret(pin, saved.salt, saved.hash)) dispatch(setUnlocked(true));
-        }}
-      />
+      {lockType === 'pattern' ? (
+        <PatternLock
+          onComplete={(pattern) => {
+            const raw = settingsStorage.getString('pattern');
+            if (!raw) return;
+            const saved = JSON.parse(raw) as { salt: string; hash: string };
+            if (verifySecret(pattern.join('-'), saved.salt, saved.hash)) dispatch(setUnlocked(true));
+            else setMessage('Pattern does not match');
+          }}
+        />
+      ) : (
+        <>
+          <Field label="PIN" value={pin} onChangeText={setPin} secure />
+          <PrimaryButton
+            label="Unlock"
+            onPress={() => {
+              const raw = settingsStorage.getString('pin');
+              if (!raw) return;
+              const saved = JSON.parse(raw) as { salt: string; hash: string };
+              if (verifySecret(pin, saved.salt, saved.hash)) dispatch(setUnlocked(true));
+              else setMessage('PIN does not match');
+            }}
+          />
+        </>
+      )}
+      {message ? <Text accessibilityRole="alert">{message}</Text> : null}
     </Card>
   );
 }
@@ -898,24 +967,6 @@ function Row({ label, value, onChange }: { label: string; value: boolean; onChan
 
 function useActivePage() {
   return useAppSelector((state) => state.scanner.pages.find((page) => page.id === state.scanner.activePageId) ?? null);
-}
-
-function samplePage() {
-  const width = 36;
-  const height = 32;
-  const data = new Uint8ClampedArray(width * height * 4);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const page = x >= 8 && x <= 28 && y >= 6 && y <= 26;
-      const offset = (y * width + x) * 4;
-      const value = page ? 245 : 12;
-      data[offset] = value;
-      data[offset + 1] = value;
-      data[offset + 2] = value;
-      data[offset + 3] = 255;
-    }
-  }
-  return { width, height, data };
 }
 
 function safeStats() {
@@ -976,5 +1027,6 @@ const styles = StyleSheet.create({
   cameraFallback: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   cameraActions: { padding: 16, gap: 8, backgroundColor: '#0E1514' },
   pdf: { flex: 1, minHeight: 360 },
+  preview: { width: '100%', height: 220, backgroundColor: '#111', borderRadius: 8 },
   switchRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
 });

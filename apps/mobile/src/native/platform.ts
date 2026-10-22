@@ -9,6 +9,7 @@ import { createMMKV } from 'react-native-mmkv';
 import TextRecognition from '@react-native-ml-kit/text-recognition';
 import RNFS from 'react-native-fs';
 import { Linking } from 'react-native';
+import { base64ToBytes, bytesToBase64 } from '../imaging/base64';
 import {
   APPLE_CLIENT_ID,
   GOOGLE_IOS_CLIENT_ID,
@@ -124,8 +125,17 @@ export async function recognizeText(uri: string): Promise<string> {
 }
 
 export async function writePdf(name: string, bytes: Uint8Array): Promise<string> {
+  return writeBytes(name, bytes);
+}
+
+export async function readBytes(uri: string): Promise<Uint8Array> {
+  const path = uri.replace(/^file:\/\//, '');
+  const encoded = await RNFS.readFile(path, 'base64');
+  return base64ToBytes(encoded);
+}
+
+export async function writeBytes(name: string, bytes: Uint8Array): Promise<string> {
   const path = `${RNFS.DocumentDirectoryPath}/${name}`;
-  const binary = Array.from(bytes, (value) => String.fromCharCode(value)).join('');
-  await RNFS.writeFile(path, binary, 'ascii');
+  await RNFS.writeFile(path, bytesToBase64(bytes), 'base64');
   return `file://${path}`;
 }
