@@ -51,7 +51,7 @@ def _ts() -> str:
 
 
 def _email() -> str:
-    return f"testauth_{_ts()}@barrio.dev"
+    return f"testauth_{_ts()}@auth.example.com"
 
 
 PASSWORD_OK = "TestPass99"
@@ -62,13 +62,13 @@ def http():
     s = requests.Session()
     s.headers.update({"Content-Type": "application/json"})
     yield s
-    # cleanup: anything we inserted with an @barrio.dev email + tokens for those user_ids
-    users = list(db.users.find({"email": {"$regex": r"@barrio\.dev$"}}, {"user_id": 1}))
+    # cleanup: anything we inserted with an @auth.example.com email + tokens for those user_ids
+    users = list(db.users.find({"email": {"$regex": r"@auth\.example\.com$"}}, {"user_id": 1}))
     ids = [u["user_id"] for u in users]
     if ids:
         db.user_sessions.delete_many({"user_id": {"$in": ids}})
         db.auth_tokens.delete_many({"user_id": {"$in": ids}})
-    db.users.delete_many({"email": {"$regex": r"@barrio\.dev$"}})
+    db.users.delete_many({"email": {"$regex": r"@auth\.example\.com$"}})
     db.users.delete_many({"user_id": {"$regex": r"^user_it20_"}})
     db.user_sessions.delete_many({"user_id": {"$regex": r"^user_it20_"}})
     db.auth_tokens.delete_many({"user_id": {"$regex": r"^user_it20_"}})
@@ -408,7 +408,7 @@ class TestGoogleBackwardCompat:
         token = f"sess_it20_{uuid.uuid4().hex}"
         db.users.insert_one({
             "user_id": uid,
-            "email": f"legacy_google_{_ts()}@barrio.dev",
+            "email": f"legacy_google_{_ts()}@auth.example.com",
             "name": "Legacy Google",
             "picture": "https://x/y.png",
             "gender": None, "age": None,

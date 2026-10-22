@@ -7,6 +7,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { AuthProvider, UserRole } from '@scanflow/types';
 import * as argon2 from 'argon2';
+import { randomUUID } from 'crypto';
 import { Request } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
@@ -287,6 +288,7 @@ export class AuthService {
       sub: user.id,
       deviceId,
       typ: 'refresh',
+      jti: randomUUID(),
     };
     const accessToken = await this.jwt.signAsync(accessPayload, { expiresIn: ACCESS_TTL_SECONDS });
     const refreshToken = await this.jwt.signAsync(refreshPayload, {

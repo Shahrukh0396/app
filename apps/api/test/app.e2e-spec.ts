@@ -27,7 +27,7 @@ suite('auth and documents (e2e)', () => {
   });
 
   it('registers, logs in, and performs document CRUD', async () => {
-    const email = `e2e-${Date.now()}@scanflow.app`;
+    const email = `e2e-${Date.now()}@example.com`;
     const deviceId = 'device-e2e-123456';
     const registered = await request(app.getHttpServer())
       .post('/auth/register')

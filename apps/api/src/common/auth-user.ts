@@ -17,4 +17,5 @@ export interface RefreshTokenPayload {
   sub: string;
   deviceId: string;
   typ: 'refresh';
+  jti: string;
 }

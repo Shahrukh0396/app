@@ -18,7 +18,7 @@ describe('AuthService', () => {
     jwtRefreshSecret: 'refresh-secret-refresh-secret-refresh',
   } as AppEnv;
 
-  function setup() {
+  function setup(jwtService?: JwtService) {
     const users: Array<Record<string, unknown>> = [];
     const tokens: Array<Record<string, unknown>> = [];
     const audits: Array<Record<string, unknown>> = [];
@@ -47,6 +47,9 @@ describe('AuthService', () => {
       },
       refreshToken: {
         create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
+          if (tokens.some((token) => token.tokenHash === data.tokenHash)) {
+            throw new Error('Unique constraint failed on the fields: (`tokenHash`)');
+          }
           const row = { id: `rt-${tokens.length + 1}`, revokedAt: null, ...data };
           tokens.push(row);
           return row;
@@ -64,8 +67,13 @@ describe('AuthService', () => {
       passwordResetToken: { create: jest.fn(), findUnique: jest.fn() },
       $transaction: jest.fn(),
     };
-    const jwt = {
-      signAsync: jest.fn(async (payload: { typ: string }) => `${payload.typ}.${tokens.length + users.length}.token`),
+    const jwt = jwtService ?? {
+      signAsync: jest.fn(async (payload: { typ: string; jti?: string; sub?: string; email?: string }) => {
+        if (payload.typ === 'refresh') {
+          return `refresh.${payload.jti ?? 'stable'}.${payload.sub ?? ''}`;
+        }
+        return `access.${payload.sub ?? ''}.${payload.email ?? ''}`;
+      }),
       verifyAsync: jest.fn(),
     };
     const audit = { write: jest.fn(async (input: Record<string, unknown>) => void audits.push(input)) };
@@ -73,25 +81,32 @@ describe('AuthService', () => {
     const oauth = { verifyGoogle: jest.fn(), verifyApple: jest.fn(), verifyMicrosoft: jest.fn() };
     const service = new AuthService(
       prisma as never,
-      jwt as unknown as JwtService,
+      jwt as JwtService,
       audit as never,
       mail as never,
       oauth as never,
       env,
     );
-    return { service, prisma, jwt, audit, users, tokens };
+    return {
+      service,
+      prisma,
+      jwt: jwt as { signAsync: jest.Mock; verifyAsync: jest.Mock },
+      audit,
+      users,
+      tokens,
+    };
   }
 
   it('registers a user, hashes the password, and writes an audit event', async () => {
     const { service, users, audit, tokens } = setup();
     const result = await service.register({
       name: 'Ada',
-      email: 'Ada@Scanflow.app',
+      email: 'Ada@Example.com',
       password: 'correct-horse',
       deviceId: 'device-1234',
       request: request(),
     });
-    expect(result.user.email).toBe('ada@scanflow.app');
+    expect(result.user.email).toBe('ada@example.com');
     expect(result.tokenType).toBe('Bearer');
     expect(result.expiresIn).toBe(15 * 60);
     expect(typeof users[0]?.passwordHash).toBe('string');
@@ -100,11 +115,33 @@ describe('AuthService', () => {
     expect(tokens).toHaveLength(1);
   });
 
+  it('stores a distinct refresh-token hash for each issue', async () => {
+    const { service, tokens } = setup(new JwtService({ secret: env.jwtAccessSecret }));
+    const registered = await service.register({
+      name: 'Ada',
+      email: 'ada@example.com',
+      password: 'correct-horse',
+      deviceId: 'device-1234',
+      request: request(),
+    });
+    const loggedIn = await service.login({
+      email: 'ada@example.com',
+      password: 'correct-horse',
+      deviceId: 'device-1234',
+      request: request(),
+    });
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]?.tokenHash).not.toBe(tokens[1]?.tokenHash);
+    expect(hashToken(registered.refreshToken)).toBe(tokens[0]?.tokenHash);
+    expect(hashToken(loggedIn.refreshToken)).toBe(tokens[1]?.tokenHash);
+    expect(registered.refreshToken).not.toBe(loggedIn.refreshToken);
+  });
+
   it('rejects a duplicate email', async () => {
     const { service } = setup();
     await service.register({
       name: 'Ada',
-      email: 'ada@scanflow.app',
+      email: 'ada@example.com',
       password: 'correct-horse',
       deviceId: 'device-1234',
       request: request(),
@@ -112,7 +149,7 @@ describe('AuthService', () => {
     await expect(
       service.register({
         name: 'Ada',
-        email: 'ada@scanflow.app',
+        email: 'ada@example.com',
         password: 'correct-horse',
         deviceId: 'device-1234',
         request: request(),
@@ -124,14 +161,14 @@ describe('AuthService', () => {
     const { service, audit } = setup();
     await service.register({
       name: 'Ada',
-      email: 'ada@scanflow.app',
+      email: 'ada@example.com',
       password: 'correct-horse',
       deviceId: 'device-1234',
       request: request(),
     });
     await expect(
       service.login({
-        email: 'ada@scanflow.app',
+        email: 'ada@example.com',
         password: 'wrong-password',
         deviceId: 'device-1234',
         request: request(),
@@ -144,7 +181,7 @@ describe('AuthService', () => {
     const { service, jwt, tokens } = setup();
     const issued = await service.register({
       name: 'Ada',
-      email: 'ada@scanflow.app',
+      email: 'ada@example.com',
       password: 'correct-horse',
       deviceId: 'device-1234',
       request: request(),
@@ -164,7 +201,7 @@ describe('AuthService', () => {
     const { service, jwt, prisma, tokens } = setup();
     const issued = await service.register({
       name: 'Ada',
-      email: 'ada@scanflow.app',
+      email: 'ada@example.com',
       password: 'correct-horse',
       deviceId: 'device-1234',
       request: request(),
