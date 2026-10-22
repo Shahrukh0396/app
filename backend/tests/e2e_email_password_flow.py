@@ -128,7 +128,7 @@ async def main() -> None:
         step(3, "POST /auth/register with weak password must 422")
         r = await api.post(
             "/auth/register",
-            json={"email": f"weak_{unique}@x.io", "password": "onlyletters"},
+            json={"email": f"weak_{unique}@example.com", "password": "onlyletters"},
         )
         if r.status_code != 422:
             fail(f"expected 422, got {r.status_code}: {r.text}")
@@ -268,7 +268,7 @@ async def main() -> None:
         await db.user_sessions.delete_many({"user_id": user_id})
         await db.auth_tokens.delete_many({"user_id": user_id})
         # also drop the "weak" user if it slipped through
-        await db.users.delete_one({"email": f"weak_{unique}@x.io"})
+        await db.users.delete_one({"email": f"weak_{unique}@example.com"})
         ok("test artifacts removed")
 
     print(f"\n{BOLD}{GREEN}ALL 15 STEPS PASSED — Email/Password flow is production-ready.{RESET}\n")

@@ -1,0 +1,12 @@
+node_modules
+dist
+.next
+coverage
+pnpm-lock.yaml
+frontend
+backend
+apps/api/generated
+apps/mobile/android
+apps/mobile/ios
+test_reports
+.emergent

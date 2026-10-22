@@ -80,3 +80,23 @@ memory/test_credentials.md
 
 # Mobile development
 android-sdk/
+
+# Scanflow
+.pnpm-store/
+.turbo/
+apps/api/dist/
+apps/api/generated/
+apps/admin/.next/
+apps/admin/out/
+apps/mobile/android/.gradle/
+apps/mobile/android/app/build/
+apps/mobile/android/build/
+apps/mobile/ios/Pods/
+apps/mobile/ios/build/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+**/.env
+!**/.env.example
