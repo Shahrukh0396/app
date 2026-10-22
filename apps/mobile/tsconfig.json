@@ -1,0 +1,14 @@
+{
+  "extends": "@react-native/typescript-config",
+  "compilerOptions": {
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "@env": ["src/types/env.d.ts"],
+      "@scanflow/types": ["../../packages/types/src/index.ts"]
+    },
+    "types": ["jest"]
+  },
+  "include": ["src", "index.js"],
+  "exclude": ["**/node_modules", "**/Pods", "android", "ios"]
+}
