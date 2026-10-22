@@ -1,0 +1,44 @@
+{
+  "name": "scanflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scanflow document scanner platform",
+  "packageManager": "pnpm@10.33.4",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "postinstall": "pnpm --filter @scanflow/types build",
+    "lint": "eslint .",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "build": "pnpm --filter @scanflow/types build && pnpm --filter @scanflow/api build && pnpm --filter @scanflow/admin build",
+    "format": "prettier --write \"apps/**/*.{ts,tsx,json}\" \"packages/**/*.{ts,tsx,json}\" \"infra/**/*.{yml,conf,sh}\" \"*.{json,yml,md}\"",
+    "db:generate": "pnpm --filter @scanflow/api exec prisma generate",
+    "db:migrate": "pnpm --filter @scanflow/api exec prisma migrate deploy",
+    "db:seed": "pnpm --filter @scanflow/api exec prisma db seed"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.2.1",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.58.2"
+  },
+  "pnpm": {
+    "peerDependencyRules": {
+      "ignoreMissing": ["expo", "react-dom", "react-native-web"]
+    },
+    "onlyBuiltDependencies": [
+      "argon2",
+      "sharp",
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma",
+      "esbuild",
+      "tesseract.js",
+      "@nestjs/core"
+    ]
+  }
+}
