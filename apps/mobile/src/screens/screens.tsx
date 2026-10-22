@@ -9,7 +9,7 @@ import { PLAN_CATALOG } from '@scanflow/types';
 import { Card, Field, PrimaryButton, QuietButton, Screen, Title } from '../components/ui';
 import { translate } from '../i18n';
 import { documentsRepo, foldersRepo } from '../db/repositories';
-import { applyNamedFilter, type FilterName } from '../imaging/filters';
+import { applyAdjustments, applyNamedFilter, DEFAULT_ADJUSTMENTS, type Adjustments, type FilterName } from '../imaging/filters';
 import { rgbaToLuminance } from '../scanner/quadDetector';
 import { detectDocumentQuad, isQuadStable } from '../scanner/quadDetector';
 import { warpPerspective, type Quad } from '../scanner/homography';
@@ -349,33 +349,24 @@ export function CropScreen({ navigation }: Props<'Crop'>) {
 export function EnhancementScreen({ navigation }: Props<'Enhancement'>) {
   const page = useActivePage();
   const dispatch = useAppDispatch();
-  const [brightness, setBrightness] = useState(page?.adjustments.brightness ?? 0);
+  const adjustments = page?.adjustments ?? DEFAULT_ADJUSTMENTS;
   const filters: FilterName[] = ['original', 'magic', 'blackWhite', 'grayscale', 'colorEnhance', 'highContrast', 'document', 'receipt', 'photo'];
+  const nudge = (key: keyof Adjustments, delta: number) => {
+    const next = { ...adjustments, [key]: Math.max(-80, Math.min(80, adjustments[key] + delta)) };
+    dispatch(updateActivePage({ adjustments: next }));
+    applyAdjustments(samplePage(), next);
+  };
   return (
     <ScrollView contentContainerStyle={styles.scroll}>
       <Title>Enhance</Title>
       <Animated.View entering={FadeInRight.duration(240)}>
-        <Text>Brightness {Math.round(brightness)}</Text>
-        <View style={styles.row}>
-          <QuietButton
-            label="Darken"
-            hint="Decrease brightness"
-            onPress={() => {
-              const next = Math.max(-50, brightness - 5);
-              setBrightness(next);
-              dispatch(updateActivePage({ adjustments: { ...(page?.adjustments ?? { brightness: 0, contrast: 0, saturation: 0, sharpness: 0, temperature: 0, denoise: 0 }), brightness: next } }));
-            }}
-          />
-          <QuietButton
-            label="Brighten"
-            hint="Increase brightness"
-            onPress={() => {
-              const next = Math.min(50, brightness + 5);
-              setBrightness(next);
-              dispatch(updateActivePage({ adjustments: { ...(page?.adjustments ?? { brightness: 0, contrast: 0, saturation: 0, sharpness: 0, temperature: 0, denoise: 0 }), brightness: next } }));
-            }}
-          />
-        </View>
+        {(Object.keys(DEFAULT_ADJUSTMENTS) as Array<keyof Adjustments>).map((key) => (
+          <View key={key} style={styles.row}>
+            <Text>{key} {adjustments[key]}</Text>
+            <QuietButton label={`Decrease ${key}`} hint={`Lower ${key}`} onPress={() => nudge(key, key === 'denoise' ? -10 : -5)} />
+            <QuietButton label={`Increase ${key}`} hint={`Raise ${key}`} onPress={() => nudge(key, key === 'denoise' ? 10 : 5)} />
+          </View>
+        ))}
       </Animated.View>
       <View style={styles.row}>
         {filters.map((filter) => (
@@ -753,6 +744,16 @@ export function SettingsScreen({ navigation }: Props<'Settings'>) {
         ]}
       />
       <Text>Scanner resolution: {settings.scannerResolution}</Text>
+      <View style={styles.row}>
+        {(['standard', 'high', 'max'] as const).map((resolution) => (
+          <QuietButton
+            key={resolution}
+            label={resolution}
+            hint={`Set scanner resolution to ${resolution}`}
+            onPress={() => persist({ scannerResolution: resolution })}
+          />
+        ))}
+      </View>
       <QuietButton label="Security" onPress={() => navigation.navigate('Security')} />
       <QuietButton label="Backup" onPress={() => navigation.navigate('Backup')} />
     </ScrollView>
@@ -786,6 +787,21 @@ export function SecuritySettingsScreen() {
           setMessage('PIN saved in encrypted settings storage');
         }}
       />
+      <Text accessibilityRole="header">Pattern</Text>
+      <View style={styles.row}>
+        {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((cell) => (
+          <QuietButton
+            key={cell}
+            label={String(cell)}
+            hint={`Pattern cell ${cell}`}
+            onPress={() => {
+              const cells = pattern.split(',').map((value) => Number(value.trim())).filter((value) => Number.isInteger(value));
+              if (cells.includes(cell)) return;
+              setPattern([...cells, cell].join(','));
+            }}
+          />
+        ))}
+      </View>
       <Field label="Pattern" value={pattern} onChangeText={setPattern} hint="Cells 0 through 8" />
       <QuietButton
         label="Save pattern"
